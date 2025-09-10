@@ -2,22 +2,6 @@
 
 This project contains both the diagrams illustrating the Jenkins pipeline credential validation flow and a working implementation of the GitHub App / Business Logic Service.
 
-## 📊 Diagrams
-
-The diagrams show the complete flow of:
-1. Jenkins pipeline with branch source plugin
-2. Credential validation through business logic service
-3. EntraID authentication
-4. GitHub App token generation
-5. Scoped repository access
-
-### Available Diagram Formats
-
-- `jenkins-flow-diagram.md` - Mermaid diagram in Markdown (GitHub/VS Code compatible)
-- `jenkins-flow-diagram.puml` - PlantUML diagram
-- `jenkins-flow-diagram.py` - Python script to generate diagram using Graphviz
-- `ascii-diagram.md` - Simple ASCII flowchart
-- `README.md` - This file
 
 ## 🚀 Implementation: Probot App
 
@@ -81,21 +65,3 @@ The Probot app implements exactly the flow shown in the diagrams:
 - See `jenkins-flow-diagram.md` for the interactive Mermaid diagram
 - See individual diagram files for different format options
 
-## 🛠️ Usage
-
-### Viewing Diagrams
-
-- **Mermaid**: Open `jenkins-flow-diagram.md` in VS Code (install Mermaid preview extension) or GitHub
-- **PlantUML**: Use PlantUML extension in VS Code or online editor
-- **Python/Graphviz**: Run `python jenkins-flow-diagram.py` to generate image files
-- **ASCII**: View `ascii-diagram.md` for a simple text representation
-
-### Running the Service
-
-1. Configure the GitHub App and Azure/EntraID credentials
-2. Install dependencies: `cd probot-app && npm install`
-3. Build the project: `npm run build`
-4. Start the API server: `npm run start:api`
-5. Configure Jenkins to use the API endpoint
-
-The service is now ready to handle Jenkins credential validation requests according to the flow shown in the diagrams!
