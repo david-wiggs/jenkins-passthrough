@@ -1,0 +1,16 @@
+node_modules
+lib
+*.log
+.env
+.env.local
+.env.production
+.env.test
+*.pem
+*.pem
+.DS_Store
+*.tgz
+*.tar.gz
+coverage
+.nyc_output
+.cache
+probot-app/test-credentials.ps1
