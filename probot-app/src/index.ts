@@ -9,6 +9,11 @@ export = (app: Probot) => {
   // Setup webhook handlers
   setupWebhooks(app);
   
+  // Add a health check webhook
+  app.webhooks.on("ping", async (context) => {
+    app.log.info("Ping received - Probot app is healthy");
+  });
+  
   app.log.info("Jenkins Credential Service Probot app is ready!");
-  app.log.info("Note: Use the separate Express server for API endpoints.");
+  app.log.info("Use the Express server (express-server.ts) for Jenkins API endpoints");
 };

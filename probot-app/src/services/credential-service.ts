@@ -365,7 +365,7 @@ class CredentialService {
       }
 
       // Get the installation ID for the repository/organization
-      const installationId = await this.getInstallationId(repository, organization);
+      const installationId = await this.getInstallationId(organization, repository);
       
       if (!installationId) {
         this.safeLog("error", "No installation found for repository");
