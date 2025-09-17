@@ -1,29 +1,23 @@
 {
   "name": "jenkins-credential-service",
   "version": "1.0.0",
-  "description": "A Probot app that validates Jenkins credentials and provides scoped GitHub tokens",
+  "description": "A service that validates Jenkins credentials and provides scoped GitHub tokens using Octokit",
   "author": "Your Name <your.email@example.com>",
   "license": "ISC",
   "homepage": "https://github.com/your-org/jenkins-credential-service",
   "keywords": [
-    "probot",
     "github",
     "jenkins",
     "credentials",
-    "entraid"
+    "entraid",
+    "octokit"
   ],
   "repository": "https://github.com/your-org/jenkins-credential-service.git",
-  "main": "lib/index.js",
+  "main": "lib/express-server.js",
   "scripts": {
     "build": "tsc",
-    "dev": "npm run dev:api",
-    "dev:api": "nodemon --exec \"npm run build && node ./lib/express-server.js\"",
-    "dev:probot": "nodemon --exec \"npm run build && probot run ./lib/index.js\"",
-    "dev:both": "concurrently \"npm run dev:probot\" \"npm run dev:api\"",
-    "start": "npm run start:api",
-    "start:api": "node ./lib/express-server.js",
-    "start:probot": "probot run ./lib/index.js",
-    "start:both": "concurrently \"npm run start:probot\" \"npm run start:api\"",
+    "dev": "nodemon --exec \"npm run build && node ./lib/express-server.js\"",
+    "start": "node ./lib/express-server.js",
     "test": "jest",
     "test:watch": "jest --watch",
     "lint": "eslint src/**/*.ts",
@@ -33,10 +27,11 @@
     "@azure/msal-node": "^2.5.1",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
     "express": "^4.18.2",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
-    "probot": "^12.3.1",
+    "octokit": "^3.1.2",
     "winston": "^3.11.0"
   },
   "devDependencies": {

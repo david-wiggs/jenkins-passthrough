@@ -1,6 +1,6 @@
-import { Probot } from "probot";
 import { ConfidentialClientApplication, PublicClientApplication, Configuration } from "@azure/msal-node";
 import jwt from "jsonwebtoken";
+import { gitHubService } from "./github-service";
 
 export interface CredentialValidationRequest {
   username: string;
@@ -17,28 +17,24 @@ export interface CredentialValidationResponse {
 }
 
 class CredentialService {
-  private app: Probot | null = null;
+  private gitHubInitialized = false;
   private msalInstance: ConfidentialClientApplication | null = null;
   private publicMsalInstance: PublicClientApplication | null = null;
 
-  initialize(app: Probot) {
-    this.app = app;
+  initialize() {
     this.initializeMsal();
+    this.gitHubInitialized = gitHubService.initializeFromEnv();
   }
 
-  // Initialize for standalone mode (without Probot)
+  // Initialize for standalone mode (legacy support)
   initializeStandalone() {
-    this.initializeMsal();
+    this.initialize();
   }
 
   private safeLog(level: 'info' | 'warn' | 'error' | 'debug', message: string, data?: any) {
-    if (this.app && this.app.log) {
-      (this.app.log as any)[level](message, data);
-    } else {
-      // Fallback to console logging when Probot is not available
-      const logMethod = level === 'debug' ? 'log' : level;
-      console[logMethod as 'log' | 'info' | 'warn' | 'error'](`[${level.toUpperCase()}]`, message, data || '');
-    }
+    // Simple console logging since we're not using Probot anymore
+    const logMethod = level === 'debug' ? 'log' : level;
+    console[logMethod as 'log' | 'info' | 'warn' | 'error'](`[${level.toUpperCase()}]`, message, data || '');
   }
 
   private initializeMsal() {
@@ -358,35 +354,24 @@ class CredentialService {
    */
   private async generateScopedToken(repository: string, organization?: string): Promise<string | null> {
     try {
-      // When running in standalone mode, return a mock token for development
-      if (!this.app) {
-        this.safeLog("warn", "GitHub App not available in standalone mode, returning mock token");
+      // Use the GitHub service to generate tokens
+      if (!this.gitHubInitialized || !gitHubService.isReady()) {
+        this.safeLog("warn", "GitHub App not available, returning mock token");
         return "ghs_mock_token_for_development_" + Math.random().toString(36).substring(2);
       }
 
-      // Get the installation ID for the repository/organization
-      const installationId = await this.getInstallationId(organization, repository);
-      
-      if (!installationId) {
-        this.safeLog("error", "No installation found for repository");
-        return null;
-      }
-
-      // Create an authenticated Octokit instance for the installation
-      const octokit = await this.app.auth(installationId);
-      
-      // Create a new installation access token
-      const { data: tokenData } = await octokit.rest.apps.createInstallationAccessToken({
-        installation_id: installationId,
-        repositories: [repository],
-        permissions: {
+      // Generate installation token using the GitHub service
+      const token = await gitHubService.generateInstallationToken(
+        repository, 
+        organization,
+        {
           contents: "read",
           metadata: "read",
           pull_requests: "read"
         }
-      });
+      );
 
-      return tokenData.token;
+      return token;
 
     } catch (error) {
       this.safeLog("error", "Error generating scoped token:", error);
@@ -394,43 +379,6 @@ class CredentialService {
     }
   }
 
-  /**
-   * Gets the installation ID for a given organization or repository
-   */
-  private async getInstallationId(organization?: string, repository?: string): Promise<number | null> {
-    try {
-      if (!this.app) {
-        this.safeLog("warn", "GitHub App not available for installation lookup");
-        return null;
-      }
-
-      const github = await this.app.auth();
-      
-      if (organization) {
-        // Get installation by organization
-        const { data } = await github.rest.apps.getOrgInstallation({
-          org: organization
-        });
-        return data.id;
-      } else if (repository) {
-        // If no organization, try to find installation by repository
-        // This requires the repository to be in format "owner/repo"
-        const [owner, repo] = repository.includes("/") ? repository.split("/") : ["", repository];
-        if (owner && repo) {
-          const { data } = await github.rest.apps.getRepoInstallation({
-            owner,
-            repo
-          });
-          return data.id;
-        }
-      }
-      
-      return null;
-    } catch (error) {
-      this.safeLog("error", "Error getting installation ID:", error);
-      return null;
-    }
-  }
 }
 
 export const credentialService = new CredentialService();

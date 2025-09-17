@@ -3,43 +3,16 @@ import helmet from "helmet";
 import cors from "cors";
 import bodyParser from "body-parser";
 import { config } from "dotenv";
-import { Probot } from "probot";
 import { credentialService, CredentialValidationRequest } from "./services/credential-service";
 
 // Load environment variables from .env file
 config();
 
-// Initialize GitHub App in Express server for token generation
-const initializeGitHubApp = () => {
-  if (process.env.APP_ID && process.env.PRIVATE_KEY_PATH) {
-    try {
-      const probot = new Probot({
-        appId: process.env.APP_ID,
-        privateKey: require('fs').readFileSync(process.env.PRIVATE_KEY_PATH, 'utf8'),
-        secret: process.env.WEBHOOK_SECRET || 'development'
-      });
-      
-      credentialService.initialize(probot);
-      console.log("GitHub App initialized successfully for token generation");
-      return true;
-    } catch (error) {
-      console.error("Failed to initialize GitHub App:", error);
-      console.log("Falling back to standalone mode (mock tokens)");
-      credentialService.initializeStandalone();
-      return false;
-    }
-  } else {
-    console.log("GitHub App configuration missing, using standalone mode (mock tokens)");
-    credentialService.initializeStandalone();
-    return false;
-  }
-};
-
-const hasGitHubApp = initializeGitHubApp();
+// Initialize credential service (now includes GitHub App via Octokit)
+credentialService.initialize();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const PROBOT_PORT = process.env.PROBOT_PORT || 3001;
 
 // Security middleware
 app.use(helmet());
@@ -49,44 +22,41 @@ app.use(cors({
 }));
 app.use(bodyParser.json());
 
-// Health check endpoint - enhanced for hybrid architecture
+// Health check endpoint - simplified for single server architecture
 app.get("/health", (req: Request, res: Response) => {
   res.json({ 
     status: "healthy", 
     service: "jenkins-credential-service-api",
-    architecture: "hybrid-with-probot",
+    architecture: "octokit-only",
     timestamp: new Date().toISOString(),
-    ports: {
-      api: PORT,
-      probot: PROBOT_PORT
-    }
+    port: PORT
   });
 });
 
-// Probot integration status check
+// Probot integration status check - now shows Octokit status
 app.get("/api/probot-status", async (req: Request, res: Response) => {
   try {
     const hasGitHubAppConfig = !!(process.env.APP_ID && process.env.PRIVATE_KEY_PATH);
     
     res.json({
-      probot: {
+      github_app: {
         configured: hasGitHubAppConfig,
-        port: PROBOT_PORT,
-        webhookUrl: process.env.WEBHOOK_URL || "Not configured",
-        appId: process.env.APP_ID || "Not configured"
+        using: "octokit",
+        port: PORT,
+        app_id: process.env.APP_ID || "Not configured"
       },
       api: {
         status: "running",
         port: PORT
       },
-      integration: "hybrid-architecture",
+      integration: "octokit-only-architecture",
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    console.error("Error checking Probot status:", error);
+    console.error("Error checking GitHub App status:", error);
     res.status(500).json({ 
       error: "Service check failed",
-      probot: { status: "unknown" },
+      github_app: { status: "unknown" },
       api: { status: "running", port: PORT }
     });
   }
@@ -153,9 +123,10 @@ app.get("/api/status", (req: Request, res: Response) => {
       github: hasGitHubConfig ? "configured" : "missing"
     },
     github_app: {
-      initialized: hasGitHubApp,
-      token_type: hasGitHubApp ? "real_github_tokens" : "mock_tokens",
-      app_id: process.env.APP_ID || "not_configured"
+      initialized: hasGitHubConfig,
+      token_type: hasGitHubConfig ? "real_github_tokens" : "mock_tokens",
+      app_id: process.env.APP_ID || "not_configured",
+      using: "octokit"
     },
     debug: {
       azure_client_id: !!process.env.AZURE_CLIENT_ID,
