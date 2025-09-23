@@ -14,14 +14,48 @@ export interface CredentialValidationResponse {
   token?: string;
   error?: string;
   scopes?: string[];
+  permissions?: string;
+  userGroups?: string[];
+  matchingTeams?: string[];
+}
+
+export interface EntraIDGroup {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface GitHubTeamPermission {
+  name: string;
+  permission: string;
+  slug: string;
+}
+
+export interface AuthenticationResult {
+  success: boolean;
+  accessToken?: string;
+  error?: string;
 }
 
 class CredentialService {
   private gitHubInitialized = false;
   private msalInstance: ConfidentialClientApplication | null = null;
   private publicMsalInstance: PublicClientApplication | null = null;
+  private gitHubService = gitHubService;
+  
+  private config = {
+    groupPattern: undefined as string | undefined,
+    teamPattern: undefined as string | undefined
+  };
 
   initialize() {
+    // Load config from environment variables after dotenv has loaded them
+    this.config.groupPattern = process.env.GROUP_PATTERN;
+    this.config.teamPattern = process.env.TEAM_PATTERN;
+    
+    this.safeLog("debug", `Loaded GROUP_PATTERN: ${this.config.groupPattern}`);
+    this.safeLog("debug", `Loaded TEAM_PATTERN: ${this.config.teamPattern}`);
+    
     this.initializeMsal();
     this.gitHubInitialized = gitHubService.initializeFromEnv();
   }
@@ -79,40 +113,75 @@ class CredentialService {
     try {
       this.safeLog("info", `Validating credentials for user: ${request.username}, repo: ${request.repository}`);
 
-      // Step 1: Authenticate with EntraID
-      const isAuthenticated = await this.authenticateWithEntraID(request.username, request.password);
+      // Step 1: Authenticate with EntraID and get access token
+      const authResult = await this.authenticateWithEntraID(request.username, request.password);
       
-      if (!isAuthenticated) {
+      if (!authResult.success) {
         return {
           success: false,
-          error: "Authentication failed"
+          error: authResult.error || "Authentication failed"
         };
       }
 
-      // Step 2: Check authorization for the repository
-      const isAuthorized = await this.checkRepositoryAuthorization(request.username, request.repository, request.organization);
-      
-      if (!isAuthorized) {
+      if (!authResult.accessToken) {
+        this.safeLog("error", "No access token available for user group lookup");
         return {
           success: false,
-          error: "User not authorized for this repository"
+          error: "Access token not available"
         };
       }
 
-      // Step 3: Generate scoped GitHub App token
-      const token = await this.generateScopedToken(request.repository, request.organization);
+      // Step 2: Get user groups from EntraID
+      const userGroups = await this.getUserGroups(authResult.accessToken);
+
+      // Step 3: Filter groups by pattern
+      const matchingGroups = this.filterGroupsByPattern(userGroups);
+      this.safeLog("info", `Found ${matchingGroups.length} matching groups: ${matchingGroups.map(g => g.name).join(', ')}`);
+
+      // Step 4: Get repository teams
+      const repoTeams = await this.getRepositoryTeams(request.organization || 'default-org', request.repository);
+
+      // Step 5: Filter teams by pattern
+      const matchingTeams = this.filterTeamsByPattern(repoTeams);
+      this.safeLog("info", `Found ${matchingTeams.length} matching teams: ${matchingTeams.map(t => t.name).join(', ')}`);
+
+      // Step 6: Calculate permissions based on group-team matching
+      const permission = this.calculatePermissions(matchingGroups, matchingTeams);
       
-      if (!token) {
+      // Check if user is authorized (has matching groups/teams)
+      if (!permission) {
+        this.safeLog("warn", `User ${request.username} is not authorized for repository ${request.repository} - no matching groups/teams found`);
         return {
           success: false,
-          error: "Failed to generate GitHub token"
+          error: "User not authorized - no matching EntraID groups and GitHub teams found",
+          userGroups: matchingGroups.map(g => g.name),
+          matchingTeams: matchingTeams.map(t => t.name)
+        };
+      }
+
+      this.safeLog("info", `Calculated required permissions: ${permission}`);
+
+      // Step 7: Generate token scopes
+      const scopes = this.getTokenScopes(permission);
+
+      // Step 8: Generate GitHub token with calculated permissions
+      const githubToken = await this.generateScopedToken(request.repository, request.organization);
+
+      if (!githubToken) {
+        this.safeLog("error", "Failed to generate GitHub token");
+        return {
+          success: false,
+          error: "Token generation failed"
         };
       }
 
       return {
         success: true,
-        token: token,
-        scopes: ["contents:read", "metadata:read", "pull_requests:read"]
+        token: githubToken,
+        scopes,
+        permissions: permission,
+        userGroups: matchingGroups.map(g => g.name),
+        matchingTeams: matchingTeams.map(t => t.name)
       };
 
     } catch (error) {
@@ -127,7 +196,7 @@ class CredentialService {
   /**
    * Authenticates user credentials against EntraID
    */
-  private async authenticateWithEntraID(username: string, password: string): Promise<boolean> {
+  private async authenticateWithEntraID(username: string, password: string): Promise<AuthenticationResult> {
     try {
       const authMethod = process.env.ENTRAID_AUTH_METHOD || "lookup";
       
@@ -144,14 +213,14 @@ class CredentialService {
       }
     } catch (error) {
       this.safeLog("error", "EntraID authentication error:", error);
-      return false;
+      return { success: false, error: "Authentication error" };
     }
   }
 
   /**
    * Mock authentication for development/testing
    */
-  private async mockAuthentication(username: string, password: string): Promise<boolean> {
+  private async mockAuthentication(username: string, password: string): Promise<AuthenticationResult> {
     const validUsers = process.env.TEST_VALID_USERS?.split(",") || [];
     const isValidUser = validUsers.includes(username) || validUsers.includes("*");
     
@@ -160,16 +229,30 @@ class CredentialService {
     // Simulate network delay
     await new Promise(resolve => setTimeout(resolve, 100));
     
-    return isValidUser;
+    if (isValidUser) {
+      return { 
+        success: true, 
+        accessToken: "mock_access_token_" + Math.random().toString(36).substring(2) 
+      };
+    } else {
+      return { success: false, error: "Invalid credentials" };
+    }
   }
 
   /**
    * User lookup authentication - validates user exists in EntraID
    */
-  private async userLookupAuthentication(username: string): Promise<boolean> {
+  private async userLookupAuthentication(username: string): Promise<AuthenticationResult> {
     if (!this.msalInstance) {
       this.safeLog("warn", "MSAL not configured, falling back to mock auth");
-      return process.env.NODE_ENV === "development";
+      if (process.env.NODE_ENV === "development") {
+        return { 
+          success: true, 
+          accessToken: "lookup_mock_token_" + Math.random().toString(36).substring(2) 
+        };
+      } else {
+        return { success: false, error: "MSAL not configured" };
+      }
     }
 
     try {
@@ -184,23 +267,28 @@ class CredentialService {
         // Use the access token to look up the user
         const userExists = await this.lookupUserInGraph(response.accessToken, username);
         this.safeLog("info", `User lookup for ${username}: ${userExists ? "FOUND" : "NOT_FOUND"}`);
-        return userExists;
+        
+        if (userExists) {
+          return { success: true, accessToken: response.accessToken };
+        } else {
+          return { success: false, error: "User not found in directory" };
+        }
       }
 
-      return false;
-    } catch (error) {
+      return { success: false, error: "Failed to acquire access token" };
+    } catch (error: any) {
       this.safeLog("error", "User lookup authentication error:", error);
-      return false;
+      return { success: false, error: error.message || "Authentication failed" };
     }
   }
 
   /**
    * Full Resource Owner Password Credentials authentication
    */
-  private async fullROPCAuthentication(username: string, password: string): Promise<boolean> {
+  private async fullROPCAuthentication(username: string, password: string): Promise<AuthenticationResult> {
     if (!this.publicMsalInstance) {
       this.safeLog("warn", "MSAL Public Client not configured for ROPC");
-      return false;
+      return { success: false, error: "ROPC not configured" };
     }
 
     try {
@@ -225,14 +313,14 @@ class CredentialService {
         
         if (isValidUser) {
           this.safeLog("info", `Token verification successful for user: ${username}`);
-          return true;
+          return { success: true, accessToken: response.accessToken };
         } else {
           this.safeLog("warn", `Token verification failed for user: ${username}`);
-          return false;
+          return { success: false, error: "Token verification failed" };
         }
       } else {
         this.safeLog("warn", `ROPC authentication failed: No access token received for user: ${username}`);
-        return false;
+        return { success: false, error: "No access token received" };
       }
     } catch (error: any) {
       this.safeLog("error", `ROPC authentication error for user ${username}:`, {
@@ -253,7 +341,7 @@ class CredentialService {
         this.safeLog("error", "ROPC Error: Invalid request. Check that the application is configured as a public client.");
       }
       
-      return false;
+      return { success: false, error: error.message || "Authentication failed" };
     }
   }
 
@@ -320,6 +408,220 @@ class CredentialService {
       this.safeLog("error", "Graph API lookup error:", error);
       return false;
     }
+  }
+
+  /**
+   * Get user groups from EntraID using Microsoft Graph API
+   */
+  private async getUserGroups(accessToken: string): Promise<EntraIDGroup[]> {
+    try {
+      this.safeLog("debug", "Fetching user groups from Microsoft Graph API");
+      
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/memberOf?$select=id,displayName,description', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        this.safeLog("error", `Failed to fetch user groups: ${response.status} ${response.statusText}`);
+        return [];
+      }
+
+      const data = await response.json() as { value: any[] };
+      
+      // Filter only groups (not directory roles or other objects)
+      const groups: EntraIDGroup[] = data.value
+        .filter((item: any) => item['@odata.type'] === '#microsoft.graph.group')
+        .map((group: any) => ({
+          id: group.id,
+          name: group.displayName,
+          description: group.description || ''
+        }));
+
+      this.safeLog("debug", `Retrieved ${groups.length} groups for user`);
+      return groups;
+    } catch (error: any) {
+      this.safeLog("error", "Error fetching user groups:", error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Filter groups by configured regex pattern
+   */
+  private filterGroupsByPattern(groups: EntraIDGroup[]): EntraIDGroup[] {
+    if (!this.config.groupPattern) {
+      this.safeLog("warn", "No GROUP_PATTERN configured, returning all groups");
+      return groups;
+    }
+
+    try {
+      const regex = new RegExp(this.config.groupPattern, 'i');
+      const filteredGroups = groups.filter(group => regex.test(group.name));
+      
+      this.safeLog("debug", `Filtered ${groups.length} groups to ${filteredGroups.length} matching pattern: ${this.config.groupPattern}`);
+      return filteredGroups;
+    } catch (error: any) {
+      this.safeLog("error", `Invalid GROUP_PATTERN regex: ${this.config.groupPattern}`, error.message);
+      return groups; // Return all groups if pattern is invalid
+    }
+  }
+
+  /**
+   * Get repository teams from GitHub
+   */
+  private async getRepositoryTeams(repositoryOwner: string, repositoryName: string): Promise<GitHubTeamPermission[]> {
+    try {
+      this.safeLog("debug", `Fetching teams for repository: ${repositoryOwner}/${repositoryName}`);
+      
+      const teams = await this.gitHubService.getRepositoryTeams(repositoryOwner, repositoryName);
+      
+      const teamPermissions: GitHubTeamPermission[] = teams.map((team: any) => ({
+        name: team.name,
+        permission: team.permission || 'read', // Default to read if permission not specified
+        slug: team.slug
+      }));
+
+      this.safeLog("debug", `Retrieved ${teamPermissions.length} teams for repository`);
+      return teamPermissions;
+    } catch (error: any) {
+      this.safeLog("error", `Error fetching repository teams for ${repositoryOwner}/${repositoryName}:`, error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Filter teams by configured regex pattern
+   */
+  private filterTeamsByPattern(teams: GitHubTeamPermission[]): GitHubTeamPermission[] {
+    if (!this.config.teamPattern) {
+      this.safeLog("warn", "No TEAM_PATTERN configured, returning all teams");
+      return teams;
+    }
+
+    try {
+      const regex = new RegExp(this.config.teamPattern, 'i');
+      const filteredTeams = teams.filter(team => regex.test(team.name));
+      
+      this.safeLog("debug", `Filtered ${teams.length} teams to ${filteredTeams.length} matching pattern: ${this.config.teamPattern}`);
+      return filteredTeams;
+    } catch (error: any) {
+      this.safeLog("error", `Invalid TEAM_PATTERN regex: ${this.config.teamPattern}`, error.message);
+      return teams; // Return all teams if pattern is invalid
+    }
+  }
+
+  /**
+   * Calculate the highest permission level based on group-team matching
+   * Returns null if no matches are found (authorization failure)
+   */
+  private calculatePermissions(filteredGroups: EntraIDGroup[], filteredTeams: GitHubTeamPermission[]): string | null {
+    this.safeLog("debug", `Calculating permissions from ${filteredGroups.length} groups and ${filteredTeams.length} teams`);
+    
+    // AUTHORIZATION DENIAL: If no matching groups or teams, deny access
+    if (filteredGroups.length === 0 || filteredTeams.length === 0) {
+      this.safeLog("warn", "Authorization denied: No matching groups or teams found");
+      return null;
+    }
+
+    // Permission hierarchy (highest to lowest)
+    const permissionLevels = ['admin', 'maintain', 'push', 'triage', 'pull', 'read'];
+    let highestPermission = 'read';
+    let foundMatch = false;
+
+    // Look for group-team matches using configured patterns
+    for (const group of filteredGroups) {
+      for (const team of filteredTeams) {
+        let isMatch = false;
+        const groupLower = group.name.toLowerCase();
+        const teamLower = team.name.toLowerCase();
+        
+        // Method 1: Direct substring matching
+        if (groupLower.includes(teamLower) || teamLower.includes(groupLower)) {
+          isMatch = true;
+        }
+        
+        // Method 2: Use configured patterns to extract permission levels and compare
+        if (!isMatch && this.config.groupPattern && this.config.teamPattern) {
+          try {
+            const groupRegex = new RegExp(this.config.groupPattern, 'i');
+            const teamRegex = new RegExp(this.config.teamPattern, 'i');
+            
+            const groupMatch = group.name.match(groupRegex);
+            const teamMatch = team.name.match(teamRegex);
+            
+            // If both match the patterns, extract the permission level (capture group 1)
+            if (groupMatch && teamMatch && groupMatch[1] && teamMatch[1]) {
+              const groupPermission = groupMatch[1].toLowerCase();
+              const teamPermission = teamMatch[1].toLowerCase();
+              
+              // Match if same permission level
+              if (groupPermission === teamPermission) {
+                isMatch = true;
+                this.safeLog("debug", `Found pattern-based match: Group "${group.name}" (${groupPermission}) <-> Team "${team.name}" (${teamPermission})`);
+              }
+            }
+          } catch (error: any) {
+            this.safeLog("error", "Error in pattern-based matching:", error.message);
+          }
+        }
+        
+        if (isMatch) {
+          this.safeLog("debug", `Found match: Group "${group.name}" <-> Team "${team.name}" (${team.permission})`);
+          foundMatch = true;
+          
+          // Update to highest permission found
+          const currentPermissionIndex = permissionLevels.indexOf(team.permission);
+          const highestPermissionIndex = permissionLevels.indexOf(highestPermission);
+          
+          if (currentPermissionIndex < highestPermissionIndex) {
+            highestPermission = team.permission;
+            this.safeLog("debug", `Updated highest permission to: ${highestPermission}`);
+          }
+        }
+      }
+    }
+
+    // AUTHORIZATION DENIAL: If groups and teams exist but no name matches found
+    if (!foundMatch) {
+      this.safeLog("warn", "Authorization denied: No matching group/team names found");
+      return null;
+    }
+
+    this.safeLog("info", `Final calculated permission: ${highestPermission}`);
+    return highestPermission;
+  }
+
+  /**
+   * Generate token scopes based on permission level
+   */
+  private getTokenScopes(permission: string): string[] {
+    const scopes: string[] = [];
+    
+    switch (permission.toLowerCase()) {
+      case 'admin':
+        scopes.push('repo', 'admin:repo_hook', 'delete_repo');
+        break;
+      case 'maintain':
+        scopes.push('repo', 'admin:repo_hook');
+        break;
+      case 'push':
+        scopes.push('repo');
+        break;
+      case 'triage':
+        scopes.push('repo:status', 'repo_deployment');
+        break;
+      case 'pull':
+      case 'read':
+      default:
+        scopes.push('repo:status', 'public_repo');
+        break;
+    }
+
+    this.safeLog("debug", `Generated scopes for permission '${permission}': ${scopes.join(', ')}`);
+    return scopes;
   }
 
   /**

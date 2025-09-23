@@ -154,6 +154,32 @@ class GitHubService {
   }
 
   /**
+   * Get teams that have access to a repository
+   */
+  async getRepositoryTeams(owner: string, repo: string): Promise<any[]> {
+    try {
+      if (!this.isReady()) {
+        console.warn("GitHub App not initialized");
+        return [];
+      }
+
+      const octokit = await this.getInstallationOctokit(owner, repo);
+      
+      // Get teams for the repository
+      const response = await octokit.rest.repos.listTeams({
+        owner,
+        repo,
+      });
+
+      console.log(`Found ${response.data.length} teams for repository ${owner}/${repo}`);
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching teams for repository ${owner}/${repo}:`, error);
+      return [];
+    }
+  }
+
+  /**
    * Check if GitHub App is properly initialized
    */
   isReady(): boolean {
