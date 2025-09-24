@@ -2,6 +2,14 @@ import { ConfidentialClientApplication, PublicClientApplication, Configuration }
 import jwt from "jsonwebtoken";
 import { gitHubService } from "./github-service";
 
+// GitHub standard permission hierarchy (lowest to highest privilege)
+// These match the permission levels returned by the GitHub API
+const GITHUB_PERMISSION_HIERARCHY = ['pull', 'triage', 'push', 'maintain', 'admin'];
+
+// GitHub Personal Access Token regex pattern
+// Format: gh[pours]_[a-zA-Z0-9/]{36}
+const GITHUB_PAT_REGEX = /^gh[pours]_[a-zA-Z0-9/]{36}$/;
+
 export interface CredentialValidationRequest {
   username: string;
   password: string;
@@ -13,7 +21,7 @@ export interface CredentialValidationResponse {
   success: boolean;
   token?: string;
   error?: string;
-  scopes?: string[];
+  scopes?: string[]; // Token scopes granted for successful authorization
   permissions?: string;
   userGroups?: string[];
   matchingTeams?: string[];
@@ -55,6 +63,7 @@ class CredentialService {
     
     this.safeLog("debug", `Loaded GROUP_PATTERN: ${this.config.groupPattern}`);
     this.safeLog("debug", `Loaded TEAM_PATTERN: ${this.config.teamPattern}`);
+    this.safeLog("debug", `Using GitHub standard permission hierarchy: ${GITHUB_PERMISSION_HIERARCHY.join(' < ')}`);
     
     this.initializeMsal();
     this.gitHubInitialized = gitHubService.initializeFromEnv();
@@ -69,6 +78,24 @@ class CredentialService {
     // Simple console logging since we're not using Probot anymore
     const logMethod = level === 'debug' ? 'log' : level;
     console[logMethod as 'log' | 'info' | 'warn' | 'error'](`[${level.toUpperCase()}]`, message, data || '');
+  }
+
+  /**
+   * Check if the provided password is a GitHub Personal Access Token
+   * GitHub PAT format: gh[pours]_[a-zA-Z0-9]{36}
+   * Examples: ghp_1234567890123456789012345678901234567890 (classic PAT)
+   *          gho_1234567890123456789012345678901234567890 (OAuth app token)
+   *          ghu_1234567890123456789012345678901234567890 (GitHub App user token)
+   *          ghr_1234567890123456789012345678901234567890 (refresh token)
+   *          ghs_1234567890123456789012345678901234567890 (server-to-server token)
+   */
+  private isGitHubPAT(password: string): boolean {
+    const isPAT = GITHUB_PAT_REGEX.test(password.trim());
+    if (isPAT) {
+      const patType = password.substring(0, 3);
+      this.safeLog("debug", `GitHub PAT detected with type prefix: ${patType}`);
+    }
+    return isPAT;
   }
 
   private initializeMsal() {
@@ -113,6 +140,21 @@ class CredentialService {
     try {
       this.safeLog("info", `Validating credentials for user: ${request.username}, repo: ${request.repository}`);
 
+      // Step 0: Check if password is a GitHub Personal Access Token
+      if (this.isGitHubPAT(request.password)) {
+        this.safeLog("info", `GitHub PAT detected as password for user: ${request.username} - bypassing EntraID authentication`);
+        this.safeLog("info", `Returning PAT directly to Jenkins for repository: ${request.repository}`);
+        this.safeLog("info", `Authorization successful. PAT passthrough enabled with scopes: pat-passthrough`);
+        return {
+          success: true,
+          token: request.password,
+          scopes: ['pat-passthrough'], // Special scope to indicate PAT usage
+          permissions: 'pat',
+          userGroups: ['github-pat-user'],
+          matchingTeams: ['github-pat-bypass']
+        };
+      }
+
       // Step 1: Authenticate with EntraID and get access token
       const authResult = await this.authenticateWithEntraID(request.username, request.password);
       
@@ -153,7 +195,7 @@ class CredentialService {
         this.safeLog("warn", `User ${request.username} is not authorized for repository ${request.repository} - no matching groups/teams found`);
         return {
           success: false,
-          error: "User not authorized - no matching EntraID groups and GitHub teams found",
+          error: "The set of credentials that were supplied are not authorized for this repository",
           userGroups: matchingGroups.map(g => g.name),
           matchingTeams: matchingTeams.map(t => t.name)
         };
@@ -161,8 +203,10 @@ class CredentialService {
 
       this.safeLog("info", `Calculated required permissions: ${permission}`);
 
-      // Step 7: Generate token scopes
-      const scopes = this.getTokenScopes(permission);
+      // Step 7: Generate token scopes based on repository and permission
+      const owner = request.organization || 'default-org';
+      const repo = request.repository;
+      const scopes = await this.getTokenScopes(owner, repo, permission);
 
       // Step 8: Generate GitHub token with calculated permissions
       const githubToken = await this.generateScopedToken(request.repository, request.organization);
@@ -171,9 +215,12 @@ class CredentialService {
         this.safeLog("error", "Failed to generate GitHub token");
         return {
           success: false,
-          error: "Token generation failed"
+          error: "The set of credentials that were supplied are not authorized - token generation failed"
         };
       }
+
+      this.safeLog("info", `Authorization successful. Granted scopes: ${scopes.join(', ')}`);
+      this.safeLog("info", `Credential validation successful for ${request.username}@${request.repository}`);
 
       return {
         success: true,
@@ -516,6 +563,7 @@ class CredentialService {
   /**
    * Calculate the highest permission level based on group-team matching
    * Returns null if no matches are found (authorization failure)
+   * Merges permissions from all matching teams
    */
   private calculatePermissions(filteredGroups: EntraIDGroup[], filteredTeams: GitHubTeamPermission[]): string | null {
     this.safeLog("debug", `Calculating permissions from ${filteredGroups.length} groups and ${filteredTeams.length} teams`);
@@ -526,9 +574,7 @@ class CredentialService {
       return null;
     }
 
-    // Permission hierarchy (highest to lowest)
-    const permissionLevels = ['admin', 'maintain', 'push', 'triage', 'pull', 'read'];
-    let highestPermission = 'read';
+    const matchingTeamPermissions: string[] = [];
     let foundMatch = false;
 
     // Look for group-team matches using configured patterns
@@ -543,7 +589,7 @@ class CredentialService {
           isMatch = true;
         }
         
-        // Method 2: Use configured patterns to extract permission levels and compare
+        // Method 2: Use configured patterns to extract project and permission levels
         if (!isMatch && this.config.groupPattern && this.config.teamPattern) {
           try {
             const groupRegex = new RegExp(this.config.groupPattern, 'i');
@@ -552,15 +598,17 @@ class CredentialService {
             const groupMatch = group.name.match(groupRegex);
             const teamMatch = team.name.match(teamRegex);
             
-            // If both match the patterns, extract the permission level (capture group 1)
-            if (groupMatch && teamMatch && groupMatch[1] && teamMatch[1]) {
-              const groupPermission = groupMatch[1].toLowerCase();
-              const teamPermission = teamMatch[1].toLowerCase();
+            // If both match the patterns, extract project ID (capture group 1) and permission level (capture group 2)
+            if (groupMatch && teamMatch && groupMatch[1] && groupMatch[2] && teamMatch[1] && teamMatch[2]) {
+              const groupProject = groupMatch[1].toLowerCase();
+              const groupPermission = groupMatch[2].toLowerCase();
+              const teamProject = teamMatch[1].toLowerCase();
+              const teamPermission = teamMatch[2].toLowerCase();
               
-              // Match if same permission level
-              if (groupPermission === teamPermission) {
+              // Match if same project AND same permission level
+              if (groupProject === teamProject && groupPermission === teamPermission) {
                 isMatch = true;
-                this.safeLog("debug", `Found pattern-based match: Group "${group.name}" (${groupPermission}) <-> Team "${team.name}" (${teamPermission})`);
+                this.safeLog("debug", `Found pattern-based match: Group "${group.name}" (${groupProject}/${groupPermission}) <-> Team "${team.name}" (${teamProject}/${teamPermission})`);
               }
             }
           } catch (error: any) {
@@ -572,13 +620,9 @@ class CredentialService {
           this.safeLog("debug", `Found match: Group "${group.name}" <-> Team "${team.name}" (${team.permission})`);
           foundMatch = true;
           
-          // Update to highest permission found
-          const currentPermissionIndex = permissionLevels.indexOf(team.permission);
-          const highestPermissionIndex = permissionLevels.indexOf(highestPermission);
-          
-          if (currentPermissionIndex < highestPermissionIndex) {
-            highestPermission = team.permission;
-            this.safeLog("debug", `Updated highest permission to: ${highestPermission}`);
+          // Collect this team's permission for merging
+          if (!matchingTeamPermissions.includes(team.permission)) {
+            matchingTeamPermissions.push(team.permission);
           }
         }
       }
@@ -590,38 +634,159 @@ class CredentialService {
       return null;
     }
 
-    this.safeLog("info", `Final calculated permission: ${highestPermission}`);
+    // Merge permissions by finding the highest level
+    const highestPermission = this.mergePermissions(matchingTeamPermissions);
+    
+    this.safeLog("info", `Found matching team permissions: ${matchingTeamPermissions.join(', ')}`);
+    this.safeLog("info", `Final merged permission: ${highestPermission}`);
+    
     return highestPermission;
   }
 
   /**
-   * Generate token scopes based on permission level
+   * Merge multiple permissions by selecting the highest level
    */
-  private getTokenScopes(permission: string): string[] {
-    const scopes: string[] = [];
-    
-    switch (permission.toLowerCase()) {
-      case 'admin':
-        scopes.push('repo', 'admin:repo_hook', 'delete_repo');
-        break;
-      case 'maintain':
-        scopes.push('repo', 'admin:repo_hook');
-        break;
-      case 'push':
-        scopes.push('repo');
-        break;
-      case 'triage':
-        scopes.push('repo:status', 'repo_deployment');
-        break;
-      case 'pull':
-      case 'read':
-      default:
-        scopes.push('repo:status', 'public_repo');
-        break;
+  private mergePermissions(permissions: string[]): string {
+    if (permissions.length === 0) {
+      return 'read'; // Default fallback
     }
 
-    this.safeLog("debug", `Generated scopes for permission '${permission}': ${scopes.join(', ')}`);
-    return scopes;
+    if (permissions.length === 1) {
+      return permissions[0];
+    }
+
+    // Find the highest permission level based on hierarchy
+    let highestIndex = -1; // Start with no permission found
+    let highestPermission = 'read';
+
+    for (const permission of permissions) {
+      const index = GITHUB_PERMISSION_HIERARCHY.indexOf(permission.toLowerCase());
+      if (index !== -1 && index > highestIndex) {
+        highestIndex = index;
+        highestPermission = permission;
+      }
+    }
+
+    this.safeLog("debug", `Merged permissions ${permissions.join(', ')} -> ${highestPermission}`);
+    return highestPermission;
+  }
+
+  /**
+   * Get installation token with permissions based on GitHub team permissions
+   */
+  async getTokenScopes(owner: string, repo: string, permission: string): Promise<string[]> {
+    try {
+      // Get actual teams for this repository
+      const teams = await this.gitHubService.getRepositoryTeams(owner, repo);
+      
+      if (!teams || teams.length === 0) {
+        this.safeLog("warn", `No teams found for ${owner}/${repo}`);
+        return this.convertPermissionToScopes(permission); // Use permission-based fallback
+      }
+
+      // Convert teams to our expected format
+      const teamPermissions: GitHubTeamPermission[] = teams.map((team: any) => ({
+        name: team.name,
+        slug: team.slug || team.name.toLowerCase().replace(/\s+/g, '-'),
+        permission: team.permission || 'pull' // Default to pull if no permission specified
+      }));
+
+      // Filter teams that match the calculated permission level
+      const matchingTeams = teamPermissions.filter((team: GitHubTeamPermission) => 
+        team.permission.toLowerCase() === permission.toLowerCase()
+      );
+
+      if (matchingTeams.length === 0) {
+        this.safeLog("warn", `No teams found with permission level '${permission}' for ${owner}/${repo}`);
+        return this.convertPermissionToScopes(permission); // Use permission-based fallback
+      }
+
+      // Convert GitHub permission to token scopes
+      const scopes = this.convertPermissionToScopes(permission);
+      
+      this.safeLog("debug", `Generated scopes for permission '${permission}': ${scopes.join(', ')}`);
+      return scopes;
+      
+    } catch (error: any) {
+      this.safeLog("error", "Error getting token scopes:", error.message);
+      return this.convertPermissionToScopes(permission); // Fallback to permission-based scopes
+    }
+  }
+
+  /**
+   * Convert GitHub permission level to appropriate token scopes
+   */
+  private convertPermissionToScopes(permission: string): string[] {
+    const permissionLower = permission.toLowerCase();
+    
+    switch (permissionLower) {
+      case 'admin':
+        return [
+          'administration:write',
+          'metadata:write',
+          'contents:write',
+          'issues:write',
+          'pull_requests:write',
+          'actions:write',
+          'checks:write',
+          'deployments:write',
+          'pages:write',
+          'repository_hooks:write',
+          'security_events:write',
+          'statuses:write'
+        ];
+      
+      case 'maintain':
+      case 'maintainer':
+        return [
+          'metadata:write',
+          'contents:write',
+          'issues:write',
+          'pull_requests:write',
+          'actions:write',
+          'checks:write',
+          'deployments:write',
+          'pages:write',
+          'repository_hooks:write',
+          'statuses:write'
+        ];
+      
+      case 'push':
+      case 'write':
+      case 'developer':
+        return [
+          'metadata:write',
+          'contents:write',
+          'issues:write',
+          'pull_requests:write',
+          'actions:write',
+          'checks:write',
+          'statuses:write'
+        ];
+      
+      case 'triage':
+        return [
+          'metadata:read',
+          'contents:read',
+          'issues:write',
+          'pull_requests:write'
+        ];
+      
+      case 'pull':
+      case 'read':
+      case 'readonly':
+        return [
+          'metadata:read',
+          'contents:read'
+        ];
+      
+      default:
+        this.safeLog("warn", `Unknown permission level '${permission}', defaulting to read-only access`);
+        return [
+          'metadata:read',
+          'contents:read'
+        ];
+    }
   }
 
   /**
