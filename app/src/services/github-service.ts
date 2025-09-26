@@ -174,7 +174,7 @@ class GitHubService {
       console.log(`Found ${response.data.length} teams for repository ${owner}/${repo}`);
       return response.data;
     } catch (error) {
-      console.error(`Error fetching teams for repository ${owner}/${repo}:`, error);
+      console.error("Error fetching teams for repository %s/%s:", owner, repo, error);
       return [];
     }
   }
