@@ -104,8 +104,12 @@ class GitHubService {
     permissions?: Record<string, string>
   ): Promise<string | null> {
     if (!this.app || !this.isInitialized) {
-      console.warn("GitHub App not initialized, returning mock token");
-      return "ghs_mock_token_for_development_" + Math.random().toString(36).substring(2);
+      if (process.env.NODE_ENV === "development" || process.env.ALLOW_MOCK_TOKENS === "true") {
+        console.warn("GitHub App not initialized, returning mock token (development mode)");
+        return "ghs_mock_token_for_development_" + Math.random().toString(36).substring(2);
+      }
+      console.error("GitHub App not initialized - cannot generate installation tokens");
+      return null;
     }
 
     try {

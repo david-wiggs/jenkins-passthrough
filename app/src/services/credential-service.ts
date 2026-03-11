@@ -878,8 +878,12 @@ class CredentialService {
     try {
       // Use the GitHub service to generate tokens
       if (!this.gitHubInitialized || !gitHubService.isReady()) {
-        this.safeLog("warn", "GitHub App not available, returning mock token");
-        return "ghs_mock_token_for_development_" + Math.random().toString(36).substring(2);
+        if (process.env.NODE_ENV === "development" || process.env.ALLOW_MOCK_TOKENS === "true") {
+          this.safeLog("warn", "GitHub App not available, returning mock token (development mode)");
+          return "ghs_mock_token_for_development_" + Math.random().toString(36).substring(2);
+        }
+        this.safeLog("error", "GitHub App not configured - cannot generate real tokens. Set APP_ID and PRIVATE_KEY_PATH environment variables.");
+        return null;
       }
 
       // Convert the calculated permission level to GitHub App installation token permissions

@@ -91,12 +91,16 @@ app.post("/api/validate-credentials", async (req: Request, res: Response) => {
         success: true,
         token: result.token,
         scopes: result.scopes,
+        permissions: result.permissions,
+        userGroups: result.userGroups,
+        matchingTeams: result.matchingTeams,
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() // 1 hour from now
       });
     } else {
       console.warn(`Credential validation failed for ${username}@${repository}: ${result.error}`);
       res.status(401).json({
         success: false,
+        message: result.error,
         error: result.error
       });
     }
