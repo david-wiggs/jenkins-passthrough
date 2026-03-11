@@ -209,7 +209,7 @@ class CredentialService {
       const scopes = await this.getTokenScopes(owner, repo, permission);
 
       // Step 8: Generate GitHub token with calculated permissions
-      const githubToken = await this.generateScopedToken(request.repository, request.organization);
+      const githubToken = await this.generateScopedToken(request.repository, request.organization, permission);
 
       if (!githubToken) {
         this.safeLog("error", "Failed to generate GitHub token");
@@ -817,9 +817,64 @@ class CredentialService {
   }
 
   /**
+   * Converts a permission level string into GitHub App installation token permissions.
+   */
+  private getInstallationTokenPermissions(permission: string): Record<string, string> {
+    switch (permission.toLowerCase()) {
+      case 'admin':
+        return {
+          contents: "write",
+          metadata: "write",
+          issues: "write",
+          pull_requests: "write",
+          actions: "write",
+          checks: "write",
+          deployments: "write",
+          statuses: "write",
+          administration: "write"
+        };
+      case 'maintain': case 'maintainer':
+        return {
+          contents: "write",
+          metadata: "write",
+          issues: "write",
+          pull_requests: "write",
+          actions: "write",
+          checks: "write",
+          deployments: "write",
+          statuses: "write"
+        };
+      case 'push': case 'write': case 'developer':
+        return {
+          contents: "write",
+          metadata: "write",
+          issues: "write",
+          pull_requests: "write",
+          actions: "write",
+          checks: "write",
+          statuses: "write"
+        };
+      case 'triage':
+        return {
+          contents: "read",
+          metadata: "read",
+          issues: "write",
+          pull_requests: "write"
+        };
+      case 'pull': case 'read': case 'readonly':
+      default:
+        return {
+          contents: "read",
+          metadata: "read",
+          pull_requests: "read"
+        };
+    }
+  }
+
+  /**
    * Generates a scoped GitHub App installation token
    */
-  private async generateScopedToken(repository: string, organization?: string): Promise<string | null> {
+  private async generateScopedToken(repository: string, organization?: string, permission?: string): Promise<string | null> {
     try {
       // Use the GitHub service to generate tokens
       if (!this.gitHubInitialized || !gitHubService.isReady()) {
@@ -827,15 +882,15 @@ class CredentialService {
         return "ghs_mock_token_for_development_" + Math.random().toString(36).substring(2);
       }
 
+      // Convert the calculated permission level to GitHub App installation token permissions
+      const tokenPermissions = this.getInstallationTokenPermissions(permission || 'read');
+      this.safeLog("info", `Generating installation token with permissions: ${JSON.stringify(tokenPermissions)}`);
+
       // Generate installation token using the GitHub service
       const token = await gitHubService.generateInstallationToken(
         repository, 
         organization,
-        {
-          contents: "read",
-          metadata: "read",
-          pull_requests: "read"
-        }
+        tokenPermissions
       );
 
       return token;
