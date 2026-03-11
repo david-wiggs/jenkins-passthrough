@@ -122,9 +122,12 @@ class GitHubService {
       }
 
       // Create installation access token
+      // Don't scope to specific repositories via the 'repositories' parameter.
+      // Scoping to a specific repo has been observed to cause 403 errors during
+      // git HTTPS operations even when the token appears valid for API calls.
+      // The token will have access to all repos the installation covers.
       const { data: tokenData } = await this.app.octokit.rest.apps.createInstallationAccessToken({
         installation_id: installationId,
-        repositories: [repository],
         permissions: permissions || {
           contents: "read",
           metadata: "read",
