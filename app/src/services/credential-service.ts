@@ -723,7 +723,7 @@ class CredentialService {
       case 'admin':
         return [
           'administration:write',
-          'metadata:write',
+          'metadata:read',
           'contents:write',
           'issues:write',
           'pull_requests:write',
@@ -739,7 +739,7 @@ class CredentialService {
       case 'maintain':
       case 'maintainer':
         return [
-          'metadata:write',
+          'metadata:read',
           'contents:write',
           'issues:write',
           'pull_requests:write',
@@ -755,7 +755,7 @@ class CredentialService {
       case 'write':
       case 'developer':
         return [
-          'metadata:write',
+          'metadata:read',
           'contents:write',
           'issues:write',
           'pull_requests:write',
@@ -824,7 +824,7 @@ class CredentialService {
       case 'admin':
         return {
           contents: "write",
-          metadata: "write",
+          metadata: "read",
           issues: "write",
           pull_requests: "write",
           actions: "write",
@@ -836,7 +836,7 @@ class CredentialService {
       case 'maintain': case 'maintainer':
         return {
           contents: "write",
-          metadata: "write",
+          metadata: "read",
           issues: "write",
           pull_requests: "write",
           actions: "write",
@@ -847,7 +847,7 @@ class CredentialService {
       case 'push': case 'write': case 'developer':
         return {
           contents: "write",
-          metadata: "write",
+          metadata: "read",
           issues: "write",
           pull_requests: "write",
           actions: "write",
