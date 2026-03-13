@@ -1,326 +1,284 @@
-# Jenkins Credential Service
+# Jenkins Credential Service - Probot App
 
-A lightweight service that validates Jenkins credentials against EntraID and provides scoped GitHub tokens using dynamic permission matching.
+A TypeScript-based Probot GitHub App that serves as a business logic service for Jenkins pipeline credential validation. This app validates credentials against EntraID, checks repository authorization, and generates scoped GitHub App installation tokens for Jenkins pipelines.
 
-## 📋 Overview
+## Features
 
-This service provides Jenkins with secure access to GitHub repositories by:
+- 🔐 **EntraID Integration**: Validates user credentials against Azure Active Directory/EntraID
+- 🛡️ **Repository Authorization**: Implements business logic to control repository access
+- 🎯 **Scoped Tokens**: Generates GitHub App installation tokens scoped to specific repositories
+- 🚀 **Express API**: Provides REST endpoints for Jenkins integration
+- 📊 **Webhook Handling**: Listens to GitHub events for real-time updates
+- 🔧 **TypeScript**: Fully typed for better development experience
 
-- **Dual Authentication Methods**: Supports both EntraID credential validation and GitHub Personal Access Token passthrough
-- **Dynamic Authorization**: Uses real-time GitHub team permissions with intelligent pattern-based matching between EntraID groups and GitHub teams  
-- **Permission Merging**: When users belong to multiple teams, automatically grants the highest permission level
-- **Scoped Token Generation**: Creates GitHub App installation tokens with minimal required scopes based on user permissions
-- **Enterprise Integration**: Built for organizations using EntraID for user management and GitHub for code repositories
+## Architecture
 
-## 🚀 Quick Start
+This service implements the credential flow shown in your diagram:
 
+1. Jenkins sends username/password + repository info
+2. Service validates credentials with EntraID  
+3. Service checks repository authorization
+4. Service generates scoped GitHub App token
+5. Returns token to Jenkins for repository operations
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 18+ 
+- A GitHub App with appropriate permissions
+- Azure/EntraID application registration
+
+### Installation
+
+1. Clone and install dependencies:
 ```bash
-cd app
+cd probot-app
 npm install
+```
+
+2. Configure environment variables:
+```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+3. Build and start the application:
+```bash
+npm run build
 npm start
 ```
 
-**Jenkins API URL:** `http://localhost:3000/api/validate-credentials`
+### Development
 
-## ✨ Features
+For development with hot reload:
+```bash
+npm run dev
+```
 
-- 🔐 **EntraID Authentication**: Validates credentials against Azure Active Directory
-- � **GitHub PAT Support**: Automatically detects and bypasses authentication for GitHub Personal Access Tokens
-- 🛡️ **Dynamic Authorization**: Uses actual GitHub team permissions with intelligent pattern matching
-- 🔄 **Permission Merging**: Automatically merges multiple team permissions to grant highest access level
-- 🎯 **Scoped GitHub Tokens**: Real GitHub App installation tokens with appropriate scopes
-- ⚡ **Single Server**: Lightweight Express API (no webhook complexity)
-- 🔧 **TypeScript**: Fully typed for better development experience
+## Configuration
 
----
+### GitHub App Setup
 
+1. Create a GitHub App in your organization settings
+2. Configure permissions:
+   - Repository permissions: Contents (read), Metadata (read), Pull requests (read)
+   - Organization permissions: Members (read)
+3. Generate and download a private key
+4. Note the App ID and Webhook Secret
 
-<details>
-<summary>📋 API Endpoints</summary>
+### Azure/EntraID Setup
 
-### Main Endpoint
-- `POST /api/validate-credentials` - Jenkins credential validation
+1. Register an application in Azure AD
+2. Configure API permissions for Microsoft Graph
+3. Create a client secret
+4. Note the Client ID, Tenant ID, and Client Secret
 
-### Monitoring
-- `GET /health` - Health check
-- `GET /api/status` - Service configuration and GitHub App status  
-- `GET /api/ping` - Connectivity test
+### Environment Variables
 
-### Request Format
+Copy `.env.example` to `.env` and configure:
+
+- **GitHub App**: `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_PATH`, `GITHUB_WEBHOOK_SECRET`
+- **Azure/EntraID**: `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`
+- **Authorization**: `AUTHORIZED_USERS`, `AUTHORIZED_REPOS` (comma-separated, use `*` for all)
+
+## API Endpoints
+
+### POST /api/validate-credentials
+
+Main endpoint for Jenkins credential validation.
+
+**Request:**
 ```json
 {
-  "username": "user@domain.com",
-  "password": "user_password_or_github_pat",
-  "repository": "repo-name", 
-  "organization": "org-name"
+  "username": "user@company.com",
+  "password": "user_password",
+  "repository": "my-repo",
+  "organization": "my-org"
 }
 ```
 
-### Response Format
-**Successful Authorization:**
+**Response (Success):**
 ```json
 {
   "success": true,
-  "token": "ghs_real_github_installation_token",
-  "scopes": ["metadata:write", "contents:write", "issues:write", "pull_requests:write"],
-  "permissions": "push",
-  "userGroups": ["azgALMAP12345SVCDeveloper"],
-  "matchingTeams": ["azgALMAP12345SCMDeveloper"]
+  "token": "ghs_xxxxxxxxxxxx",
+  "scopes": ["my-repo"],
+  "expiresAt": "2024-01-01T12:00:00.000Z"
 }
 ```
 
-**Authorization Failure:**
+**Response (Failure):**
 ```json
 {
   "success": false,
-  "error": "The set of credentials that were supplied are not authorized for this repository",
-  "userGroups": ["azgALMAP12345SVCReadOnly"],
-  "matchingTeams": ["azgALMAP12345SCMReadOnly"]
+  "error": "Authentication failed"
 }
 ```
 
-**GitHub PAT Detection:**
-```json
-{
-  "success": true,
-  "token": "ghp_1234567890123456789012345678901234567890",
-  "scopes": ["pat-passthrough"],
-  "permissions": "pat",
-  "userGroups": ["github-pat-user"],
-  "matchingTeams": ["github-pat-bypass"]
+### GET /api/status
+
+Check service configuration and health.
+
+### GET /api/ping
+
+Simple connectivity test endpoint.
+
+### GET /health
+
+Health check endpoint.
+
+## Jenkins Integration
+
+Configure your Jenkins pipeline to call this service:
+
+```groovy
+pipeline {
+    agent any
+    
+    stages {
+        stage('Get GitHub Token') {
+            steps {
+                script {
+                    def response = httpRequest(
+                        httpMode: 'POST',
+                        url: 'https://your-probot-app.com/api/validate-credentials',
+                        contentType: 'APPLICATION_JSON',
+                        requestBody: """
+                        {
+                            "username": "${env.GIT_USERNAME}",
+                            "password": "${env.GIT_PASSWORD}",
+                            "repository": "${env.GIT_REPO}",
+                            "organization": "${env.GIT_ORG}"
+                        }
+                        """
+                    )
+                    
+                    def json = readJSON text: response.content
+                    
+                    if (json.success) {
+                        env.GITHUB_TOKEN = json.token
+                    } else {
+                        error("Credential validation failed: ${json.error}")
+                    }
+                }
+            }
+        }
+        
+        stage('Checkout') {
+            steps {
+                git(
+                    url: "https://github.com/${env.GIT_ORG}/${env.GIT_REPO}.git",
+                    credentialsId: 'github-token-credential'
+                )
+            }
+        }
+    }
 }
 ```
 
-</details>
+## Customization
 
-<details>
-<summary>⚙️ Configuration</summary>
+### Authorization Logic
 
-Create `app/.env`:
+Modify `src/services/credential-service.ts` to implement your specific authorization rules:
+
+```typescript
+private async checkRepositoryAuthorization(username: string, repository: string, organization?: string): Promise<boolean> {
+    // Implement your custom authorization logic here
+    // Examples:
+    // - Check user groups in EntraID
+    // - Query database for user permissions
+    // - Check repository-specific access rules
+    
+    return true; // Replace with your logic
+}
+```
+
+### EntraID Integration
+
+Customize the EntraID authentication in `authenticateWithEntraID()` method to match your organization's setup.
+
+## Development
+
+### Scripts
+
+- `npm run build` - Compile TypeScript
+- `npm run dev` - Development with hot reload  
+- `npm start` - Start production server
+- `npm test` - Run tests
+- `npm run lint` - Lint code
+
+### Testing
 
 ```bash
-# GitHub App (for real tokens)
-APP_ID=your_app_id
-PRIVATE_KEY_PATH=private-key.pem
+# Run all tests
+npm test
 
-# Azure/EntraID  
-AZURE_CLIENT_ID=your_client_id
-AZURE_CLIENT_SECRET=your_client_secret
-AZURE_TENANT_ID=your_tenant_id
-ENTRAID_AUTH_METHOD=ropc
+# Run with watch mode
+npm run test:watch
 
-# CORS Configuration
-ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080
-
-# Business Logic Configuration
-# Regex patterns for EntraID groups and GitHub teams that determine permissions
-# Groups/teams matching these patterns will be considered for permission calculation
-
-# GROUP_PATTERN: Matches azgALM + project number + SVC + permission level
-# Example: azgALMAP12345SVCDeveloper -> captures "AP12345" and "Developer"
-GROUP_PATTERN=^azgALM(AP\d+)SVC(Developer|ReadOnly|Admin|Write|Maintainer)$
-
-# TEAM_PATTERN: Matches azgALM + project number + SCM + permission level  
-# Example: azgALMAP12345SCMDeveloper -> captures "AP12345" and "Developer"
-TEAM_PATTERN=^azgALM(AP\d+)SCM(Developer|ReadOnly|Admin|Write|Maintainer)$
-```
-
-</details>
-
-<details>
-<summary>🔄 Authentication Flow</summary>
-
-### Standard EntraID Flow
-1. **Jenkins** → `POST /api/validate-credentials` with username/password + repo info
-2. **Service** detects if password is a GitHub PAT (format: `gh[pours]_[a-zA-Z0-9/]{36}`)
-3. **If PAT detected**: Returns PAT directly with bypass message
-4. **If not PAT**: Validates credentials with **EntraID** using ROPC flow
-5. **Service** retrieves user's EntraID groups and filters by `GROUP_PATTERN`
-6. **Service** fetches repository teams and filters by `TEAM_PATTERN`
-7. **Service** matches groups to teams using pattern-based matching (project + permission level)
-8. **Service** merges permissions from multiple matching teams (grants highest permission)
-9. **GitHub App** generates scoped installation token with appropriate permissions
-10. **Jenkins** receives the scoped token with granted scopes listed
-
-### Permission Matching Logic
-- **Group Pattern**: `azgALMAP12345SVCDeveloper` → Project: `AP12345`, Permission: `Developer`
-- **Team Pattern**: `azgALMAP12345SCMDeveloper` → Project: `AP12345`, Permission: `Developer`
-- **Matching**: Groups and teams with same project + permission level are matched
-- **Merging**: If user has multiple teams (e.g., Developer + ReadOnly), grants highest permission (Developer)
-- **Hierarchy**: `pull < triage < push < maintain < admin` (GitHub standard)
-
-### Security Features
-- ✅ GitHub PAT auto-detection and passthrough
-- ✅ EntraID credential validation (ROPC, lookup, or mock modes)
-- ✅ Dynamic repository-level authorization using actual GitHub team permissions
-- ✅ Permission merging for users with multiple team memberships
-- ✅ Scoped GitHub App installation tokens with minimal required permissions
-- ✅ No direct credential exposure to GitHub
-- ✅ Centralized access control with pattern-based group/team matching
-
-</details>
-
-<details>
-<summary>🏗️ Architecture</summary>
-
-Single Express server with Octokit 
-
-```
-┌─────────────────────────────────────┐
-│          Express Server             │
-│             Port 3000               │
-├─────────────────────────────────────┤
-│  Jenkins API Endpoints              │
-│  • /api/validate-credentials        │
-│  • /health, /api/status, /api/ping  │
-├─────────────────────────────────────┤
-│  ┌─────────────────────────────┐    │
-│  │     Credential Service      │    │
-│  │  • GitHub PAT Detection     │    │
-│  │  • Azure Authentication     │    │
-│  │  • Pattern-Based Matching   │    │
-│  │  • Permission Merging       │    │
-│  └─────────────────────────────┘    │
-│  ┌─────────────────────────────┐    │
-│  │      GitHub Service         │    │
-│  │  • Octokit Integration      │    │
-│  │  • Dynamic Team Permissions │    │
-│  │  • Installation Tokens      │    │
-│  └─────────────────────────────┘    │
-└─────────────────────────────────────┘
-```
-
-</details>
-
-<details>
-<summary>🧪 Testing</summary>
-
-### Basic API Test
-```bash
-# Test with EntraID credentials
+# Test the API endpoint
 curl -X POST http://localhost:3000/api/validate-credentials \
   -H "Content-Type: application/json" \
-  -d '{
-    "username": "user@domain.com",
-    "password": "password",
-    "repository": "repo-name",
-    "organization": "org-name"
-  }'
+  -d '{"username":"test","password":"test","repository":"test-repo"}'
 ```
 
-### GitHub PAT Test
-```bash
-# Test with GitHub Personal Access Token (auto-detected)
-curl -X POST http://localhost:3000/api/validate-credentials \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "jenkins-user",
-    "password": "ghp_1234567890123456789012345678901234567890",
-    "repository": "my-repo",
-    "organization": "my-org"
-  }'
+## Deployment
+
+### Docker
+
+```dockerfile
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY lib ./lib
+EXPOSE 3000
+CMD ["npm", "start"]
 ```
 
-### Expected Responses
+### Environment Variables for Production
 
-**Successful Authorization (EntraID):**
-```json
-{
-  "success": true,
-  "token": "ghs_installation_token_here",
-  "scopes": ["metadata:write", "contents:write", "issues:write", "pull_requests:write"],
-  "permissions": "push",
-  "userGroups": ["azgALMAP12345SVCDeveloper"],
-  "matchingTeams": ["azgALMAP12345SCMDeveloper"]
-}
-```
+Ensure these are set in your production environment:
+- All Azure/GitHub configuration
+- `NODE_ENV=production`
+- `LOG_LEVEL=warn`
+- Appropriate `ALLOWED_ORIGINS`
 
-**GitHub PAT Passthrough:**
-```json
-{
-  "success": true,
-  "token": "ghp_1234567890123456789012345678901234567890",
-  "scopes": ["pat-passthrough"],
-  "permissions": "pat",
-  "userGroups": ["github-pat-user"],
-  "matchingTeams": ["github-pat-bypass"]
-}
-```
+## Security Considerations
 
-**Authorization Denied:**
-```json
-{
-  "success": false,
-  "error": "The set of credentials that were supplied are not authorized for this repository",
-  "userGroups": ["azgALMAP12345SVCReadOnly"],
-  "matchingTeams": ["azgALMAP12345SCMReadOnly"]
-}
-```
+- 🔒 Always use HTTPS in production
+- 🔑 Store private keys and secrets securely
+- 🛡️ Implement rate limiting for API endpoints  
+- 📝 Audit and log all credential validation attempts
+- 🔄 Regularly rotate GitHub App private keys and Azure secrets
+- 🚫 Never log sensitive credential information
 
-</details>
-
-<details>
-<summary>🔍 Key Features Explained</summary>
-
-### GitHub PAT Detection
-- Automatically detects GitHub Personal Access Tokens using regex: `gh[pours]_[a-zA-Z0-9/]{36}`
-- Supports all GitHub token types: `ghp_` (classic), `gho_` (OAuth), `ghu_` (user), `ghr_` (refresh), `ghs_` (server-to-server)
-- Bypasses all EntraID authentication when PAT is detected
-- Returns PAT directly to Jenkins with special indicators
-
-### Dynamic Permission System
-- Uses actual GitHub repository team permissions instead of static mappings
-- Fetches team permissions in real-time from GitHub API
-- Merges permissions when users belong to multiple teams
-- Grants highest permission level based on GitHub standard hierarchy
-
-### Pattern-Based Matching
-- Flexible regex patterns for matching EntraID groups to GitHub teams
-- Supports project-based naming conventions (e.g., AP12345 project identifiers)
-- Handles SVC (EntraID) vs SCM (GitHub) naming differences
-- Configurable via environment variables
-
-</details>
-
-<details>
-<summary>🔧 Troubleshooting</summary>
+## Troubleshooting
 
 ### Common Issues
 
-**"The set of credentials that were supplied are not authorized"**
-- Check if user's EntraID groups match the `GROUP_PATTERN` regex
-- Verify GitHub teams exist and match the `TEAM_PATTERN` regex  
-- Ensure group/team names follow the expected naming convention (same project ID and permission level)
-- Check logs for group and team filtering details
+1. **GitHub App permissions**: Ensure your app has the required repository and organization permissions
+2. **EntraID configuration**: Verify client ID, secret, and tenant ID are correct
+3. **Network connectivity**: Check firewall rules for GitHub webhooks and Azure API access
+4. **Token expiration**: GitHub App tokens expire after 1 hour by default
 
-**GitHub PAT not being detected**
-- Verify PAT format: `gh[pours]_[a-zA-Z0-9/]{36}` (exactly 36 characters after prefix)
-- Supported prefixes: `ghp_` (classic), `gho_` (OAuth), `ghu_` (user), `ghr_` (refresh), `ghs_` (server)
-- Check logs for PAT detection messages
+### Logs
 
-**Permission merging not working as expected**
-- Review the GitHub permission hierarchy: `pull < triage < push < maintain < admin`
-- Check logs for "Merged permissions" messages to see the merging logic
-- Verify that multiple teams are actually matched for the user
-
-### Debug Logging
-Set log level to see detailed flow:
+Check application logs for detailed error information:
 ```bash
-# Check group/team matching
-grep "Found.*matching" logs
-# Check permission calculation  
-grep "Merged permissions\|Final merged permission" logs
-# Check PAT detection
-grep "GitHub PAT detected" logs
+npm start 2>&1 | tee app.log
 ```
 
-</details>
+## Contributing
 
----
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Submit a pull request
 
-## 📚 Additional Documentation
+## License
 
-- `app/ENTRAID_SETUP.md` - EntraID configuration guide
-- `jenkins-flow-diagram.md` - Interactive Mermaid flow diagram  
-- `app/test-service.js` - Test script for the API
-
+ISC License - see LICENSE file for details.
